@@ -1,0 +1,262 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-server-conf
+  labels:
+    name: prometheus-server-conf
+  namespace: monitoring
+data:
+  prometheus.rules: |-
+    groups:
+    - name: Prometheus Alerts
+      rules:
+      - alert: Prometheus AlertManager config not synced
+        expr: 'count(count_values("config_hash", alertmanager_config_hash)) > 1'
+        annotations:
+          description: Configurations of AlertManager cluster instances are out of sync
+        labels:
+          severity: warning
+      - alert: Prometheus target scraping slow
+        expr: 'prometheus_target_interval_length_seconds{quantile="0.9"} > 60'
+        annotations:
+          description: Prometheus is scraping exporters slowly
+        labels:
+          severity: warning
+        for: 5m
+    
+    - name: Host and hardware
+      rules:
+      - alert: Host out of memory
+        expr: 'node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100 < 10'
+        annotations:
+          description: Node memory is filling up (< 10% left)
+        labels:
+          severity: warning
+        for: 2m
+      - alert: Host out of disk space
+        expr: '(node_filesystem_avail_bytes * 100) / node_filesystem_size_bytes < 10 and on (instance, device, mountpoint) node_filesystem_readonly == 0'
+        annotations:
+          description: Disk is almost full (< 10% left)
+        labels:
+          severity: warning
+        for: 2m
+      - alert: Host high CPU load
+        expr: '100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[2m])) * 100) > 80'
+        annotations:
+          description: CPU load is > 80%
+        labels:
+          severity: warning
+      - alert: Host OOM kill detected
+        expr: 'increase(node_vmstat_oom_kill[1m]) > 0'
+        annotations:
+          description: OOM kill detected
+        labels:
+          severity: warning
+      - alert: Host clock skew
+        expr: '(node_timex_offset_seconds > 0.05 and deriv(node_timex_offset_seconds[5m]) >= 0) or (node_timex_offset_seconds < -0.05 and deriv(node_timex_offset_seconds[5m]) <= 0)'
+        annotations:
+          description: 'Clock skew detected. Clock is out of sync.'
+        labels:
+          severity: warning
+        for: 2m
+    
+    - name: Website metrics
+      rules:
+      - alert: High number of active users
+        expr: 'site_active_users > 1000'
+        annotations:
+          description: 'The number of active users on the site is high ({{ $value }} users)'
+        labels:
+          severity: warning
+      - alert: Low number of active users
+        expr: 'site_active_users < 10'
+        annotations:
+          description: 'The number of active users on the site is low ({{ $value }} users)'
+        labels:
+          severity: warning
+      - alert: High response time
+        expr: 'site_response_time_seconds > 2'
+        annotations:
+          description: 'The response time of the site is high ({{ $value }} seconds)'
+        labels:
+          severity: warning
+        for: 2m
+      - alert: High error rate
+        expr: 'rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m]) > 0.05'
+        annotations:
+          description: 'The error rate of the site is high ({{ $value }} errors per second)'
+        labels:
+          severity: critical
+        for: 1m
+    
+    - name: User Activity Alerts
+      rules:
+      - alert: Suspicious User Activity
+        expr: 'rate(site_failed_login_attempts_total[1m]) > 10'
+        annotations:
+          description: Detected more than 10 failed login attempts per minute.
+        labels:
+          severity: critical
+    
+    - name: Database Alerts
+      rules:
+      - alert: High Database CPU Usage
+        expr: 'rate(node_cpu_seconds_total{job="db", mode!="idle"}[5m]) / rate(node_cpu_seconds_total{job="db"}[5m]) > 0.8'
+        annotations:
+          description: Database CPU usage exceeds 80%.
+        labels:
+          severity: warning
+      - alert: High Database Query Time
+        expr: 'rate(db_query_time_seconds_sum[5m]) / rate(db_query_time_seconds_count[5m]) > 0.5'
+        annotations:
+          description: Average query execution time to the database exceeds 500 ms.
+        labels:
+          severity: warning
+      - alert: Low Database Disk Space
+        expr: 'node_filesystem_avail_bytes{job="db"} / node_filesystem_size_bytes{job="db"} < 0.1'
+        annotations:
+          description: Remaining disk space in the database file system is less than 10%.
+        labels:
+          severity: warning
+    
+    - name: Network Alerts
+      rules:
+      - alert: High Network Latency
+        expr: 'rate(node_network_receive_errs_total[5m]) / rate(node_network_receive_packets_total[5m]) > 0.05'
+        annotations:
+          description: Network receive error rate exceeds 5%.
+        labels:
+          severity: warning
+      - alert: High Network Load
+        expr: 'rate(node_network_transmit_bytes_total[5m]) > 10000000'
+        annotations:
+          description: Network data transmission rate exceeds 10 MB/s.
+        labels:
+          severity: warning
+
+    - name: Container Alerts
+      rules:
+      - alert: Container Restarts
+        expr: 'rate(container_restart_count[5m]) > 5'
+        annotations:
+          description: Container has restarted more than 5 times in the last 5 minutes.
+        labels:
+          severity: critical
+  prometheus.yml: |-
+    global:
+      scrape_interval: 5s
+      evaluation_interval: 5s
+    rule_files:
+      - /etc/prometheus/prometheus.rules
+    alerting:
+      alertmanagers:
+      - scheme: http
+        static_configs:
+        - targets:
+          - "alertmanager.monitoring.svc:9093"
+    scrape_configs:
+      - job_name: 'node-exporter'
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_endpoints_name]
+          regex: 'node-exporter'
+          action: keep
+      - job_name: 'kubernetes-apiservers'
+        kubernetes_sd_configs:
+        - role: node
+        scheme: node
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+          action: keep
+          regex: default;kubernetes;https
+      - job_name: 'kubernetes-nodes'
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+        - role: node
+        relabel_configs:
+        - action: labelmap
+          regex: __meta_kubernetes_node_label_(.+)
+        - target_label: __address__
+          replacement: kubernetes.default.svc:443
+        - source_labels: [__meta_kubernetes_node_name]
+          regex: (.+)
+          target_label: __metrics_path__
+          replacement: /api/v1/nodes/${1}/proxy/metrics
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+        - role: pod
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+          action: keep
+          regex: true
+        - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+        - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+          action: replace
+          regex: ([^:]+)(?::\d+)?;(\d+)
+          replacement: $1:$2
+          target_label: __address__
+        - action: labelmap
+          regex: __meta_kubernetes_pod_label_(.+)
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: kubernetes_namespace
+        - source_labels: [__meta_kubernetes_pod_name]
+          action: replace
+          target_label: kubernetes_pod_name
+      - job_name: 'kube-state-metrics'
+        static_configs:
+          - targets: ['kube-state-metrics.kube-system.svc.cluster.local:8080']
+      - job_name: 'kubernetes-cadvisor'
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+        - role: node
+        relabel_configs:
+        - action: labelmap
+          regex: __meta_kubernetes_node_label_(.+)
+        - target_label: __address__
+          replacement: kubernetes.default.svc:443
+        - source_labels: [__meta_kubernetes_node_name]
+          regex: (.+)
+          target_label: __metrics_path__
+          replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor
+      - job_name: 'kubernetes-service-endpoints'
+        kubernetes_sd_configs:
+        - role: endpoints
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+          action: keep
+          regex: true
+        - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scheme]
+          action: replace
+          target_label: __scheme__
+          regex: (https?)
+        - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+          action: replace
+          target_label: __metrics_path__
+          regex: (.+)
+        - source_labels: [__address__, __meta_kubernetes_service_annotation_prometheus_io_port]
+          action: replace
+          target_label: __address__
+          regex: ([^:]+)(?::\d+)?;(\d+)
+          replacement: $1:$2
+        - action: labelmap
+          regex: __meta_kubernetes_service_label_(.+)
+        - source_labels: [__meta_kubernetes_namespace]
+          action: replace
+          target_label: kubernetes_namespace
+        - source_labels: [__meta_kubernetes_service_name]
+          action: replace
+          target_label: kubernetes_name
